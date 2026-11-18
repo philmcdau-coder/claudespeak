@@ -1,6 +1,7 @@
 import type { EngineInterface, PluginOptions, Register } from 'claude-code'
 
-// macspeak: claudespeak, but with the Mac's built-in voices (/usr/bin/say).
+// macspeak: claudespeak, but with the computer's own built-in voices.
+// macOS: /usr/bin/say. Windows: the SAPI voices through PowerShell (scripts/speak-windows.ps1).
 // Each finished reply is cut to 1-3 spoken sentences by a small model and read aloud.
 // No API key, no ffmpeg, no network for the speech itself.
 // One machine-wide switch (/speak on|off) and one voice at a time across all sessions.
@@ -20,7 +21,7 @@ const TAG_PREFIX = 'macspeak-'
 /** Any session's say process, and nothing else: its argv starts with /usr/bin/say. */
 export const ANY_SPEECH = `^${SAY} .*${TAG_PREFIX}[0-9]+`
 
-// Claim the current-speech file, kill every other speaker, then give way if a newer
+// macOS: claim the current-speech file, kill every other speaker, then give way if a newer
 // speaker claimed it meanwhile; otherwise become `say` reading the tagged text file.
 // $1 tag, $2 current file, $3 pkill, $4 pattern, $5 say, $6 text file, $7... say options
 const SPEAK_SCRIPT =
@@ -31,6 +32,8 @@ const SPEAK_SCRIPT =
 type Setting = { isOn: boolean; voice?: string; rate?: number }
 
 type Config = { voice: string; rate: string; summaryModel: string }
+
+type Os = 'mac' | 'windows' | 'other'
 
 const SUMMARY_SYSTEM = [
   "You turn a coding assistant's reply into what a voice assistant says out loud.",
@@ -104,26 +107,82 @@ export const parseSetting = (text: string | undefined): Setting => {
   }
 }
 
-// ---------- the mod ----------
+/** Words per minute to SAPI's -10..10 scale (0 is about 180 wpm). */
+export const sapiRate = (wpm: string): string => {
+  const n = Number(wpm)
+  if (wpm === '' || !Number.isFinite(n)) return ''
+  return String(Math.max(-10, Math.min(10, Math.round((n - 180) / 18))))
+}
 
-const st: { speechGen: number; streamTag: string | undefined; isInteractive: boolean } = {
+/** Voice names out of `say -v '?'` (mac) or the script's "name<TAB>culture" lines (Windows). */
+export const parseVoices = (os: Os, stdout: string): { name: string; lang: string }[] =>
+  stdout
+    .split(/\r?\n/)
+    .map(line => (os === 'windows' ? /^(.+?)\t(\S+)/.exec(line) : /^(.+?)\s+([a-z]{2,3}_[A-Z0-9]{2,3})\s+#/.exec(line)))
+    .filter((m): m is RegExpExecArray => m !== null)
+    .map(m => ({ name: (m[1] ?? '').trim(), lang: m[2] ?? '' }))
+
+// ---------- the platform layer ----------
+
+const st: { speechGen: number; streamTag: string | undefined; isInteractive: boolean; os: Os | undefined } = {
   speechGen: 0,
   streamTag: undefined,
   isInteractive: false,
+  os: undefined,
 }
 
 let cfg: Config = { voice: '', rate: '', summaryModel: 'haiku' }
 
+async function osOf($: $): Promise<Os> {
+  if (st.os !== undefined) return st.os
+  if ((await $.env.get('OS')) === 'Windows_NT') st.os = 'windows'
+  else st.os = (await $.fs.exists(SAY).catch(() => false)) ? 'mac' : 'other'
+  return st.os
+}
+
+const sep = (os: Os): string => (os === 'windows' ? '\\' : '/')
+
+async function powershell($: $): Promise<string> {
+  const root = ((await $.env.get('SystemRoot')) ?? 'C:\\Windows').replace(/\\+$/, '')
+  return `${root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+}
+
+/** Runs scripts/speak-windows.ps1 with a mode and its arguments. */
+async function ps($: $, args: string[], timeoutMs = 30_000) {
+  const script = `${$.plugin.root.replace(/[\\/]+$/, '')}\\scripts\\speak-windows.ps1`
+  return $.process.run(
+    [await powershell($), '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', script, ...args],
+    { timeoutMs },
+  )
+}
+
 async function homeData($: $): Promise<string> {
-  return `${(await $.env.get('HOME')) ?? ''}/${DATA_DIR}`
+  const os = await osOf($)
+  const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? ''
+  return `${home.replace(/[\\/]+$/, '')}${sep(os)}${DATA_DIR.replace('/', sep(os))}`
 }
 
 async function dataPath($: $, file: string): Promise<string> {
-  return `${await homeData($)}/${file}`
+  return `${await homeData($)}${sep(await osOf($))}${file}`
+}
+
+async function makeDataDir($: $): Promise<void> {
+  if ((await osOf($)) === 'windows') await ps($, ['mkdir', await homeData($)])
+  else await $.process.run(['/bin/mkdir', '-p', '-m', '700', await homeData($)])
+}
+
+async function removeFile($: $, path: string): Promise<void> {
+  if ((await osOf($)) === 'windows') await ps($, ['rm', path]).catch(() => undefined)
+  else await $.process.run(['/bin/rm', '-f', path]).catch(() => undefined)
+}
+
+async function tmpDir($: $): Promise<string> {
+  const dir = (await $.env.get('TMPDIR')) ?? (await $.env.get('TEMP')) ?? (await $.env.get('TMP')) ?? '/tmp'
+  return dir.replace(/[\\/]+$/, '') || '/tmp'
 }
 
 async function writeData($: $, file: string, text: string): Promise<void> {
-  await $.process.run(['/bin/mkdir', '-p', '-m', '700', await homeData($)])
+  await makeDataDir($)
   await $.fs.write(await dataPath($, file), text)
 }
 
@@ -143,22 +202,28 @@ const effective = (s: Setting): { voice: string; rate: string } => ({
   rate: s.rate !== undefined ? String(s.rate) : cfg.rate,
 })
 
+async function installedVoices($: $): Promise<{ name: string; lang: string }[]> {
+  const os = await osOf($)
+  const ran =
+    os === 'windows' ? await ps($, ['voices']).catch(() => undefined) : await $.process.run([SAY, '-v', '?']).catch(() => undefined)
+  return parseVoices(os, ran?.stdout ?? '')
+}
+
 function stopSpeech($: $): void {
   st.speechGen += 1
-  if (st.streamTag !== undefined) void $.process.run([PKILL, '-KILL', '-f', st.streamTag]).catch(() => undefined)
+  // On macOS, this session's own say. On Windows the next speaker (or /speak stop) ends it.
+  if (st.streamTag !== undefined && st.os === 'mac') {
+    void $.process.run([PKILL, '-KILL', '-f', st.streamTag]).catch(() => undefined)
+  }
   st.streamTag = undefined
 }
 
 /** Cuts speech in every session, and tells a reply still being summarised to stay quiet. */
 async function stopEverySpeech($: $): Promise<void> {
   stopSpeech($)
-  await $.process.run([PKILL, '-KILL', '-f', ANY_SPEECH]).catch(() => undefined)
+  if ((await osOf($)) === 'windows') await ps($, ['stop', await dataPath($, CURRENT_FILE)]).catch(() => undefined)
+  else await $.process.run([PKILL, '-KILL', '-f', ANY_SPEECH]).catch(() => undefined)
   await writeData($, CURRENT_FILE, `stopped ${await $.clock.now()}`)
-}
-
-async function tmpDir($: $): Promise<string> {
-  const dir = (await $.env.get('TMPDIR')) ?? '/tmp'
-  return dir.replace(/\/+$/, '') || '/tmp'
 }
 
 async function summarize($: $, answer: string): Promise<string> {
@@ -177,28 +242,40 @@ async function summarize($: $, answer: string): Promise<string> {
   return spoken !== '' ? spoken : firstSentences(answer)
 }
 
-/** Speaks one line through say. Resolves when it ends or something cuts it. */
+/** Speaks one line. Resolves when it ends or something cuts it. */
 async function sayLine($: $, text: string, voice: string, rate: string): Promise<void> {
+  const os = await osOf($)
+  if (os === 'other') {
+    $.ui.toast('macspeak works on macOS and Windows only', { timeoutMs: 8000 })
+    return
+  }
   const tag = `${TAG_PREFIX}${await $.clock.now()}`
-  const textPath = `${await tmpDir($)}/${tag}.txt`
+  const textPath = `${await tmpDir($)}${sep(os)}${tag}.txt`
   await $.fs.write(textPath, text)
-  await $.process.run(['/bin/mkdir', '-p', '-m', '700', await homeData($)])
-  const opts: string[] = []
-  if (voice !== '') opts.push('-v', voice)
-  if (/^\d+$/.test(rate)) opts.push('-r', rate)
+  await makeDataDir($)
+  const current = await dataPath($, CURRENT_FILE)
   st.streamTag = tag
   try {
-    const ran = await $.process.run(
-      ['/bin/sh', '-c', SPEAK_SCRIPT, 'macspeak', tag, await dataPath($, CURRENT_FILE), PKILL, ANY_SPEECH, SAY, textPath, ...opts],
-      { timeoutMs: 180_000 },
-    )
-    // 137 is another reply taking over. Anything else is say failing (a bad voice name, say).
-    if (ran.exitCode !== 0 && ran.exitCode !== 137) {
-      $.ui.toast(`macspeak: say failed: ${ran.stderr.trim().split('\n').pop()?.slice(0, 80) ?? ''}`, { timeoutMs: 8000 })
+    let ran
+    if (os === 'windows') {
+      ran = await ps($, ['speak', tag, current, textPath, voice, sapiRate(rate)], 180_000)
+    } else {
+      const opts: string[] = []
+      if (voice !== '') opts.push('-v', voice)
+      if (/^\d+$/.test(rate)) opts.push('-r', rate)
+      ran = await $.process.run(
+        ['/bin/sh', '-c', SPEAK_SCRIPT, 'macspeak', tag, current, PKILL, ANY_SPEECH, SAY, textPath, ...opts],
+        { timeoutMs: 180_000 },
+      )
+    }
+    // A speaker cut off by a newer reply dies silently; only a real failure writes to stderr.
+    const err = ran.stderr.trim()
+    if (ran.exitCode !== 0 && err !== '') {
+      $.ui.toast(`macspeak: speech failed: ${err.split(/\r?\n/).pop()?.slice(0, 100) ?? ''}`, { timeoutMs: 8000 })
     }
   } finally {
     if (st.streamTag === tag) st.streamTag = undefined
-    await $.process.run(['/bin/rm', '-f', textPath]).catch(() => undefined)
+    await removeFile($, textPath)
   }
 }
 
@@ -223,14 +300,10 @@ async function mayTalkHere($: $): Promise<boolean> {
   return ((await $.session.surfaces().catch(() => [])) ?? []).length > 0
 }
 
-async function englishVoices($: $): Promise<string> {
-  const ran = await $.process.run([SAY, '-v', '?']).catch(() => undefined)
-  const names = (ran?.stdout ?? '')
-    .split('\n')
-    .map(line => /^(.+?)\s{2,}(en_[A-Z]{2})\s/.exec(line))
-    .filter((m): m is RegExpExecArray => m !== null)
-    .map(m => `${m[1]} (${m[2]})`)
-  return names.length > 0 ? names.join(', ') : 'none found'
+const MORE_VOICES: Record<Os, string> = {
+  mac: 'More (including Premium/Enhanced ones) download in System Settings > Accessibility > Read & Speak > System voice > Manage Voices.',
+  windows: 'More download in Settings > Time & language > Speech > Add voices.',
+  other: '',
 }
 
 export const register: Register = (on, options) => {
@@ -240,7 +313,7 @@ export const register: Register = (on, options) => {
     st.isInteractive = e.isInteractive
     await $.command.register({
       name: 'speak',
-      description: 'Read replies aloud with the Mac voice: /speak on, off, stop, voice <name>, rate <wpm>, voices, test',
+      description: 'Read replies aloud with the built-in voice: /speak on, off, stop, voice <name>, rate <wpm>, voices, test',
       argumentHint: '[on|off|stop|voice <name>|rate <wpm>|voices|test]',
       immediate: true,
     })
@@ -252,6 +325,7 @@ export const register: Register = (on, options) => {
     const [word = '', ...rest] = raw.split(/\s+/)
     const arg = word.toLowerCase()
     const value = raw.slice(word.length).trim()
+    const os = await osOf($)
 
     if (arg === 'stop') {
       await stopEverySpeech($)
@@ -263,21 +337,22 @@ export const register: Register = (on, options) => {
       return { text: `Spoken replies are ${arg} in every session.` }
     }
     if (arg === 'voices') {
-      return { text: `English voices on this Mac: ${await englishVoices($)}. Set one with /speak voice <name>. More (including Premium/Enhanced ones) download in System Settings > Accessibility > Spoken Content > System voice > Manage Voices.` }
+      const english = (await installedVoices($)).filter(v => /^en[_-]/i.test(v.lang))
+      const list = english.length > 0 ? english.map(v => `${v.name} (${v.lang})`).join(', ') : 'none found'
+      return { text: `English voices on this computer: ${list}. Set one with /speak voice <name>. ${MORE_VOICES[os]}` }
     }
     if (arg === 'voice') {
       if (value === '' || value.toLowerCase() === 'default') {
         await saveSetting($, { voice: undefined })
         return { text: 'Using the system voice.' }
       }
-      // say -o /dev/null fails for every voice (-241), so check the installed list instead.
-      const list = await $.process.run([SAY, '-v', '?']).catch(() => undefined)
-      const installed = (list?.stdout ?? '').split('\n').some(line => line.toLowerCase().startsWith(`${value.toLowerCase()} `))
-      if (!installed) return { text: `No voice called "${value}". Run /speak voices for the list.` }
-      await saveSetting($, { voice: value })
+      const match = (await installedVoices($)).find(v => v.name.toLowerCase() === value.toLowerCase())
+      if (match === undefined) return { text: `No voice called "${value}". Run /speak voices for the list.` }
+      await saveSetting($, { voice: match.name })
       stopSpeech($)
-      void sayLine($, `Hi, I'm ${value.replace(/\s*\(.*$/, '')}. I'll read your replies from now on.`, value, effective(await readSetting($)).rate)
-      return { text: `Voice set to ${value} in every session.` }
+      const short = match.name.replace(/^Microsoft\s+/i, '').replace(/\s*(\(.*|Desktop.*)$/i, '')
+      void sayLine($, `Hi, I'm ${short}. I'll read your replies from now on.`, match.name, effective(await readSetting($)).rate)
+      return { text: `Voice set to ${match.name} in every session.` }
     }
     if (arg === 'rate') {
       const n = Number(rest[0])
@@ -298,8 +373,9 @@ export const register: Register = (on, options) => {
     const s = await readSetting($)
     const { voice, rate } = effective(s)
     const quiet = s.isOn && !(await mayTalkHere($)) ? ' This session stays quiet: no person is attached to it.' : ''
+    const unsupported = os === 'other' ? ' This computer has no supported voice: macspeak works on macOS and Windows.' : ''
     return {
-      text: `Spoken replies are ${s.isOn ? 'on' : 'off'} in every session. Voice: ${voice || 'system default'}. Rate: ${rate ? `${rate} wpm` : 'system default'}.${quiet}`,
+      text: `Spoken replies are ${s.isOn ? 'on' : 'off'} in every session. Voice: ${voice || 'system default'}. Rate: ${rate ? `${rate} wpm` : 'system default'}.${quiet}${unsupported}`,
     }
   }).catch(() => ({ text: 'macspeak: /speak failed.' }))
 
