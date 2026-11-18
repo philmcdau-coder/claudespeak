@@ -1,11 +1,11 @@
 {
-  "name": "macspeak",
-  "version": "0.2.0",
+  "name": "claudespeak",
+  "version": "0.3.0",
   "description": "Reads a 1-3 sentence summary of each finished Claude Code reply aloud with the computer's built-in voice (macOS say or Windows SAPI), one voice at a time across sessions",
   "userConfig": {
     "voice": {
       "type": "string",
-      "title": "Mac voice",
+      "title": "Voice",
       "description": "A voice name from /speak voices (Mac e.g. Karen, Windows e.g. Microsoft Zira Desktop). Empty uses the system voice. /speak voice <name> overrides it.",
       "default": ""
     },

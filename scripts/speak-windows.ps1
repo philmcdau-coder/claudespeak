@@ -1,4 +1,4 @@
-# macspeak on Windows: the built-in SAPI voices through System.Speech, no installs.
+# claudespeak on Windows: the built-in SAPI voices through System.Speech, no installs.
 # Usage:
 #   speak-windows.ps1 speak  <tag> <currentFile> <textFile> <voice|""> <sapiRate|"">
 #   speak-windows.ps1 stop   <currentFile>

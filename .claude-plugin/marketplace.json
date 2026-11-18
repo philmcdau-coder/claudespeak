@@ -1,12 +1,12 @@
 {
-  "name": "claude-macspeak",
+  "name": "claudespeak",
   "owner": { "name": "philmcdau-coder" },
-  "description": "macspeak: Claude Code replies read aloud with the Mac's built-in voices",
+  "description": "claudespeak: Claude Code replies read aloud with the computer's built-in voices (macOS and Windows)",
   "plugins": [
     {
-      "name": "macspeak",
+      "name": "claudespeak",
       "source": "./",
-      "description": "Reads a short summary of each Claude Code reply aloud with macOS say: no API key, no ffmpeg"
+      "description": "Reads a short summary of each Claude Code reply aloud with macOS say or Windows SAPI: no API key, no ffmpeg"
     }
   ]
 }

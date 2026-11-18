@@ -1,6 +1,6 @@
 import type { EngineInterface, PluginOptions, Register } from 'claude-code'
 
-// macspeak: claudespeak, but with the computer's own built-in voices.
+// claudespeak: Claude Code replies read aloud with the computer's own built-in voices.
 // macOS: /usr/bin/say. Windows: the SAPI voices through PowerShell (scripts/speak-windows.ps1).
 // Each finished reply is cut to 1-3 spoken sentences by a small model and read aloud.
 // No API key, no ffmpeg, no network for the speech itself.
@@ -14,10 +14,10 @@ const MAX_SPOKEN = 300
 const SUMMARY_TIMEOUT_MS = 6000
 
 // Outside the plugin folder, so an update never wipes the setting.
-const DATA_DIR = '.claude/macspeak'
+const DATA_DIR = '.claude/claudespeak'
 const SETTING_FILE = 'setting.json'
 const CURRENT_FILE = 'current-speech'
-const TAG_PREFIX = 'macspeak-'
+const TAG_PREFIX = 'claudespeak-'
 /** Any session's say process, and nothing else: its argv starts with /usr/bin/say. */
 export const ANY_SPEECH = `^${SAY} .*${TAG_PREFIX}[0-9]+`
 
@@ -246,7 +246,7 @@ async function summarize($: $, answer: string): Promise<string> {
 async function sayLine($: $, text: string, voice: string, rate: string): Promise<void> {
   const os = await osOf($)
   if (os === 'other') {
-    $.ui.toast('macspeak works on macOS and Windows only', { timeoutMs: 8000 })
+    $.ui.toast('claudespeak works on macOS and Windows only', { timeoutMs: 8000 })
     return
   }
   const tag = `${TAG_PREFIX}${await $.clock.now()}`
@@ -264,14 +264,14 @@ async function sayLine($: $, text: string, voice: string, rate: string): Promise
       if (voice !== '') opts.push('-v', voice)
       if (/^\d+$/.test(rate)) opts.push('-r', rate)
       ran = await $.process.run(
-        ['/bin/sh', '-c', SPEAK_SCRIPT, 'macspeak', tag, current, PKILL, ANY_SPEECH, SAY, textPath, ...opts],
+        ['/bin/sh', '-c', SPEAK_SCRIPT, 'claudespeak', tag, current, PKILL, ANY_SPEECH, SAY, textPath, ...opts],
         { timeoutMs: 180_000 },
       )
     }
     // A speaker cut off by a newer reply dies silently; only a real failure writes to stderr.
     const err = ran.stderr.trim()
     if (ran.exitCode !== 0 && err !== '') {
-      $.ui.toast(`macspeak: speech failed: ${err.split(/\r?\n/).pop()?.slice(0, 100) ?? ''}`, { timeoutMs: 8000 })
+      $.ui.toast(`claudespeak: speech failed: ${err.split(/\r?\n/).pop()?.slice(0, 100) ?? ''}`, { timeoutMs: 8000 })
     }
   } finally {
     if (st.streamTag === tag) st.streamTag = undefined
@@ -373,11 +373,11 @@ export const register: Register = (on, options) => {
     const s = await readSetting($)
     const { voice, rate } = effective(s)
     const quiet = s.isOn && !(await mayTalkHere($)) ? ' This session stays quiet: no person is attached to it.' : ''
-    const unsupported = os === 'other' ? ' This computer has no supported voice: macspeak works on macOS and Windows.' : ''
+    const unsupported = os === 'other' ? ' This computer has no supported voice: claudespeak works on macOS and Windows.' : ''
     return {
       text: `Spoken replies are ${s.isOn ? 'on' : 'off'} in every session. Voice: ${voice || 'system default'}. Rate: ${rate ? `${rate} wpm` : 'system default'}.${quiet}${unsupported}`,
     }
-  }).catch(() => ({ text: 'macspeak: /speak failed.' }))
+  }).catch(() => ({ text: 'claudespeak: /speak failed.' }))
 
   // A new prompt means the person has moved on: cut the old reply's speech.
   on('prompt.submit', ($, e, next) => {
@@ -392,7 +392,7 @@ export const register: Register = (on, options) => {
     const setting = await readSetting($)
     if (!setting.isOn) return result
     void speak($, e.answer, setting).catch(err => {
-      $.ui.toast(`macspeak: ${err instanceof Error ? err.message.slice(0, 100) : 'speech failed'}`)
+      $.ui.toast(`claudespeak: ${err instanceof Error ? err.message.slice(0, 100) : 'speech failed'}`)
     })
     return result
   })
