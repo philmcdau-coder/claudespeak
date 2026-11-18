@@ -1,0 +1,25 @@
+{
+  "name": "macspeak",
+  "version": "0.1.0",
+  "description": "Reads a 1-3 sentence summary of each finished Claude Code reply aloud with the Mac's built-in voice (say), one voice at a time across sessions",
+  "userConfig": {
+    "voice": {
+      "type": "string",
+      "title": "Mac voice",
+      "description": "A name from `say -v '?'`, e.g. Karen, Daniel, Samantha. Empty uses the system voice. /speak voice <name> overrides it.",
+      "default": ""
+    },
+    "rate": {
+      "type": "string",
+      "title": "Speaking rate",
+      "description": "Words per minute (about 175-220 is natural). Empty uses the system rate. /speak rate <n> overrides it.",
+      "default": ""
+    },
+    "summaryModel": {
+      "type": "string",
+      "title": "Summary model",
+      "description": "Small fast model that turns a long reply into 1-3 spoken sentences",
+      "default": "haiku"
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "claude-macspeak",
+  "owner": { "name": "philmcdau-coder" },
+  "description": "macspeak: Claude Code replies read aloud with the Mac's built-in voices",
+  "plugins": [
+    {
+      "name": "macspeak",
+      "source": "./",
+      "description": "Reads a short summary of each Claude Code reply aloud with macOS say: no API key, no ffmpeg"
+    }
+  ]
+}
